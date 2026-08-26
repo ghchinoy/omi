@@ -1,28 +1,14 @@
 """
 Benchmark Suite 02: Deepgram vs Modulate — Streaming transcription.
 
-Uses real human speech from LibriSpeech test-clean dataset (12 samples,
-12 speakers, 2-27s duration, 4-62 words). Ground truth transcripts for
-accurate WER measurement. Streams at real-time pace (3200 bytes/100ms).
-
-Note on parallel delivery metrics:
-    Modulate shows 0% parallel and late first-segment because our
-    SafeModulateSocket only forwards final `utterance` messages to the
-    callback, not `partial_utterance` previews. Modulate DOES send live
-    partials during streaming (first at ~1s), but they are buffered and
-    not surfaced. This benchmark measures our implementation's behavior,
-    not Modulate's raw streaming capability.
-
-Setup:
-    1. Download LibriSpeech test-clean:
-       curl -L -o /tmp/test-clean.tar.gz https://www.openslr.org/resources/12/test-clean.tar.gz
-    2. Prepare samples (shared with pre-recorded benchmark):
-       python scripts/stt/n_benchmark_02_prerecorded.py --prepare
+Uses LibriSpeech test-clean or custom manifest samples.
+Streams at real-time pace (3200 bytes/100ms).
 
 Usage:
     cd backend && python scripts/stt/o_benchmark_02_streaming.py
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -55,15 +41,32 @@ def count_punctuation(text: str) -> Dict[str, Any]:
     return {'total': len(marks), 'detail': dict(sorted(((m, marks.count(m)) for m in set(marks)), key=lambda x: -x[1]))}
 
 
-AUDIO_DIR = Path('/tmp/stt_benchmark_audio_02')
-RESULTS_DIR = Path('/tmp/stt_benchmark_results')
+DEFAULT_AUDIO_DIRS = [
+    Path('/tmp/stt_benchmark_audio_02'),
+    Path(__file__).resolve().parents[3] / 'benchmarks' / 'data' / 'stt_benchmark_audio_02',
+]
+DEFAULT_RESULTS_DIRS = [
+    Path('/tmp/stt_benchmark_results'),
+    Path(__file__).resolve().parents[3] / 'benchmarks' / 'results',
+]
 
 CHUNK_SIZE = 3200
 CHUNK_INTERVAL = 0.1
 
 
-def load_manifest() -> List[Dict[str, Any]]:
-    manifest_path = AUDIO_DIR / 'manifest.json'
+def resolve_audio_dir(custom_path: Optional[str] = None) -> Path:
+    if custom_path:
+        p = Path(custom_path)
+        if (p / 'manifest.json').exists():
+            return p
+    for p in DEFAULT_AUDIO_DIRS:
+        if (p / 'manifest.json').exists():
+            return p
+    raise FileNotFoundError('Could not find benchmark audio directory with manifest.json.')
+
+
+def load_manifest(audio_dir: Path) -> List[Dict[str, Any]]:
+    manifest_path = audio_dir / 'manifest.json'
     if not manifest_path.exists():
         print('ERROR: Samples not prepared. Run first:')
         print('  python scripts/stt/n_benchmark_02_prerecorded.py --prepare')
@@ -79,9 +82,15 @@ def read_pcm_from_wav(wav_path: Path) -> bytes:
     return data
 
 
-async def stream_to_provider(audio_pcm: bytes, language: str, provider: str) -> Dict[str, Any]:
+async def stream_to_provider(
+    audio_pcm: bytes,
+    language: str,
+    provider: str,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_interval: float = CHUNK_INTERVAL,
+) -> Dict[str, Any]:
     """Stream audio and receive transcripts in parallel, tracking per-segment timing."""
-    segment_log: List[Dict[str, Any]] = []  # [(wall_time, audio_sent_ms, segment_text, segment_count)]
+    segment_log: List[Dict[str, Any]] = []
     segments_received: List[Dict[str, Any]] = []
     stream_start: List[Optional[float]] = [None]
 
@@ -127,17 +136,18 @@ async def stream_to_provider(audio_pcm: bytes, language: str, provider: str) -> 
 
     offset = 0
     while offset < len(audio_pcm):
-        chunk = audio_pcm[offset : offset + CHUNK_SIZE]
+        chunk = audio_pcm[offset : offset + chunk_size]
         socket.send(chunk)
-        offset += CHUNK_SIZE
-        await asyncio.sleep(CHUNK_INTERVAL)
+        offset += chunk_size
+        if chunk_interval > 0:
+            await asyncio.sleep(chunk_interval)
 
     segs_before_finish = len(segments_received)
     audio_sent_time = time.monotonic() - stream_start_val
 
     if provider == 'modulate':
         try:
-            await asyncio.wait_for(socket.drain_and_close(), timeout=30)
+            await asyncio.wait_for(socket.drain_and_close(), timeout=10)
         except (asyncio.TimeoutError, Exception):
             pass
     else:
@@ -166,8 +176,16 @@ async def stream_to_provider(audio_pcm: bytes, language: str, provider: str) -> 
     }
 
 
-async def run_benchmark() -> None:
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+async def run_benchmark(
+    audio_dir_path: Optional[str] = None,
+    results_dir_path: Optional[str] = None,
+    tier: Optional[str] = None,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_interval: float = CHUNK_INTERVAL,
+) -> None:
+    audio_dir = resolve_audio_dir(audio_dir_path)
+    results_dir = Path(results_dir_path) if results_dir_path else DEFAULT_RESULTS_DIRS[0]
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     dg_key = os.getenv('DEEPGRAM_API_KEY')
     mod_key = os.getenv('MODULATE_API_KEY')
@@ -178,14 +196,17 @@ async def run_benchmark() -> None:
         print('ERROR: MODULATE_API_KEY not set')
         sys.exit(1)
 
-    manifest = load_manifest()
-    print(f'\nBenchmark Suite 02 — Streaming ({len(manifest)} samples, real human speech)')
-    print(f'Source: LibriSpeech test-clean (CC BY 4.0)')
-    print(f'Streaming at real-time pace: {CHUNK_SIZE} bytes / {CHUNK_INTERVAL}s = 16kHz mono s16le\n')
+    manifest = load_manifest(audio_dir)
+    if tier and tier.lower() != 'all':
+        manifest = [c for c in manifest if c.get('tier', '').lower() == tier.lower()]
+
+    print(f'\nBenchmark Suite 02 — Streaming ({len(manifest)} samples)')
+    print(f'Audio Directory: {audio_dir}')
+    print(f'Chunk pacing: {chunk_size} bytes / {chunk_interval*1000:.0f}ms\n')
 
     results: List[Dict[str, Any]] = []
     for case in manifest:
-        wav_path = AUDIO_DIR / f"{case['id']}.wav"
+        wav_path = audio_dir / f"{case['id']}.wav"
         audio_pcm = read_pcm_from_wav(wav_path)
         ref_norm = normalize_for_wer(case['text'])
         lang = 'en'
@@ -205,7 +226,16 @@ async def run_benchmark() -> None:
 
         for provider, prefix in [('deepgram', 'dg'), ('modulate', 'mod')]:
             try:
-                result = await stream_to_provider(audio_pcm, lang, provider)
+                result = await asyncio.wait_for(
+                    stream_to_provider(
+                        audio_pcm=audio_pcm,
+                        language=lang,
+                        provider=provider,
+                        chunk_size=chunk_size,
+                        chunk_interval=chunk_interval,
+                    ),
+                    timeout=200.0,
+                )
                 if 'error' in result:
                     raise RuntimeError(result['error'])
                 wer_val: float = compute_wer(ref_norm, normalize_for_wer(result['text'])) if result['text'] else 1.0
@@ -259,113 +289,41 @@ async def run_benchmark() -> None:
                 )
 
         results.append(row)
+        # Save results incrementally after each sample
+        output_path = results_dir / 'suite02_streaming_benchmark.json'
+        with open(output_path, 'w') as f:
+            json.dump(results, f, indent=2)
 
     print('\n' + '=' * 130)
-    print('SUITE 02 — STREAMING BENCHMARK RESULTS (Real Human Speech — LibriSpeech test-clean)')
+    print('SUITE 02 — STREAMING BENCHMARK RESULTS')
     print('=' * 130)
 
-    def fmt_time(v: float) -> str:
-        return f"{v:.2f}s" if v >= 0 else 'ERR'
-
-    table_data: List[List[Any]] = []
-    for r in results:
-        dg_during = r.get('dg_segs_during', 0)
-        dg_total_s = r.get('dg_segments', 0)
-        mod_during = r.get('mod_segs_during', 0)
-        mod_total_s = r.get('mod_segments', 0)
-        table_data.append(
-            [
-                r['id'],
-                r['ref_words'],
-                f"{r['duration_s']:.1f}s",
-                fmt_time(r.get('dg_connect', -1)),
-                fmt_time(r.get('dg_first_seg', -1)),
-                f"{dg_during}/{dg_total_s}",
-                f"{r.get('dg_wer', 1):.0%}",
-                fmt_time(r.get('mod_connect', -1)),
-                fmt_time(r.get('mod_first_seg', -1)),
-                f"{mod_during}/{mod_total_s}",
-                f"{r.get('mod_wer', 1):.0%}",
-            ]
-        )
-
-    print(
-        tabulate(
-            table_data,
-            headers=[
-                'Case',
-                'Words',
-                'Dur',
-                'DG Conn',
-                'DG 1st',
-                'DG Dur/Tot',
-                'DG WER',
-                'Mod Conn',
-                'Mod 1st',
-                'Mod Dur/Tot',
-                'Mod WER',
-            ],
-            tablefmt='grid',
-        )
-    )
-
-    print('\n  Dur/Tot = segments received during streaming / total segments')
-    print('  Higher during-stream ratio = better real-time parallel delivery')
-
-    valid_dg = [r for r in results if r.get('dg_total', -1) >= 0]
-    valid_mod = [r for r in results if r.get('mod_total', -1) >= 0]
-
-    print('\nSUMMARY (WER computed after stripping punctuation):')
-    if valid_dg:
-        dg_first_segs = [r['dg_first_seg'] for r in valid_dg if r['dg_first_seg'] >= 0]
-        avg_dg_punct = sum(r.get('dg_punct', 0) for r in valid_dg) / len(valid_dg)
-        print(
-            f"  Deepgram:  "
-            f"avg_connect={sum(r['dg_connect'] for r in valid_dg) / len(valid_dg):.2f}s  "
-            f"avg_first_seg={sum(dg_first_segs) / max(1, len(dg_first_segs)):.2f}s  "
-            f"avg_total={sum(r['dg_total'] for r in valid_dg) / len(valid_dg):.2f}s  "
-            f"avg_WER={sum(r['dg_wer'] for r in valid_dg) / len(valid_dg):.1%}  "
-            f"avg_punct={avg_dg_punct:.1f}  "
-            f"cases={len(valid_dg)}"
-        )
-    if valid_mod:
-        mod_first_segs = [r['mod_first_seg'] for r in valid_mod if r['mod_first_seg'] >= 0]
-        avg_mod_punct = sum(r.get('mod_punct', 0) for r in valid_mod) / len(valid_mod)
-        print(
-            f"  Modulate:  "
-            f"avg_connect={sum(r['mod_connect'] for r in valid_mod) / len(valid_mod):.2f}s  "
-            f"avg_first_seg={sum(mod_first_segs) / max(1, len(mod_first_segs)):.2f}s  "
-            f"avg_total={sum(r['mod_total'] for r in valid_mod) / len(valid_mod):.2f}s  "
-            f"avg_WER={sum(r['mod_wer'] for r in valid_mod) / len(valid_mod):.1%}  "
-            f"avg_punct={avg_mod_punct:.1f}  "
-            f"cases={len(valid_mod)}"
-        )
-
-    print('\nTRANSCRIPT COMPARISON:')
-    for r in results:
-        print(f"\n  [{r['id']}] {r['description']}")
-        print(f"    REF:      {r.get('ref_text', 'N/A')}")
-        if r.get('dg_text', '').startswith('ERROR'):
-            print(f"    DEEPGRAM: {r.get('dg_text', 'N/A')}")
-        else:
-            print(
-                f"    DEEPGRAM: {r.get('dg_text', 'N/A')}  (WER={r.get('dg_wer', 1):.1%}, punct={r.get('dg_punct', 0)})"
-            )
-        if r.get('mod_text', '').startswith('ERROR'):
-            print(f"    MODULATE: {r.get('mod_text', 'N/A')}")
-        else:
-            print(
-                f"    MODULATE: {r.get('mod_text', 'N/A')}  (WER={r.get('mod_wer', 1):.1%}, punct={r.get('mod_punct', 0)})"
-            )
-
-    output_path = RESULTS_DIR / 'suite02_streaming_benchmark.json'
+    output_path = results_dir / 'suite02_streaming_benchmark.json'
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2)
     print(f'\nDetailed results saved to: {output_path}')
 
 
 def main() -> None:
-    asyncio.run(run_benchmark())
+    parser = argparse.ArgumentParser(description='Deepgram & Modulate Streaming Benchmark')
+    parser.add_argument('--audio-dir', type=str, default=None, help='Path to audio directory with manifest.json')
+    parser.add_argument('--results-dir', type=str, default=None, help='Directory to save JSON benchmark results')
+    parser.add_argument('--tier', type=str, default='a', choices=['all', 'a', 'b', 'A', 'B'], help='Filter by tier (default: a for streaming)')
+    parser.add_argument('--chunk-size', type=int, default=CHUNK_SIZE, help='Audio chunk size in bytes (default: 3200)')
+    parser.add_argument('--pace', type=float, default=2.0, help='Playback pacing (1.0 = realtime, 2.0 = 2x, 0.0 = burst)')
+    args = parser.parse_args()
+
+    interval = (args.chunk_size / 32000.0) / args.pace if args.pace > 0 else 0.0
+
+    asyncio.run(
+        run_benchmark(
+            audio_dir_path=args.audio_dir,
+            results_dir_path=args.results_dir,
+            tier=args.tier,
+            chunk_size=args.chunk_size,
+            chunk_interval=interval,
+        )
+    )
 
 
 if __name__ == '__main__':

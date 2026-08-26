@@ -2,7 +2,7 @@
 STT Benchmark Suite 02 — Pre-recorded (real human speech)
 
 Compares Deepgram and Modulate pre-recorded STT on LibriSpeech test-clean
-samples, reporting WER (after punctuation stripping), latency, and
+or custom manifest samples, reporting WER (after punctuation stripping), latency, and
 punctuation retention.
 
 Usage:
@@ -10,6 +10,7 @@ Usage:
     cd backend && python3 scripts/stt/n_benchmark_02_prerecorded.py             # run benchmark
 """
 
+import argparse
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from dotenv import load_dotenv
 
@@ -42,8 +43,14 @@ def count_punctuation(text: str) -> Dict[str, Any]:
     return {'total': len(marks), 'detail': dict(sorted(((m, marks.count(m)) for m in set(marks)), key=lambda x: -x[1]))}
 
 
-AUDIO_DIR = Path('/tmp/stt_benchmark_audio_02')
-RESULTS_DIR = Path('/tmp/stt_benchmark_results')
+DEFAULT_AUDIO_DIRS = [
+    Path('/tmp/stt_benchmark_audio_02'),
+    Path(__file__).resolve().parents[3] / 'benchmarks' / 'data' / 'stt_benchmark_audio_02',
+]
+DEFAULT_RESULTS_DIRS = [
+    Path('/tmp/stt_benchmark_results'),
+    Path(__file__).resolve().parents[3] / 'benchmarks' / 'results',
+]
 LIBRISPEECH_TAR = Path('/tmp/test-clean.tar.gz')
 LIBRISPEECH_DIR = Path('/tmp/librispeech/LibriSpeech/test-clean')
 
@@ -64,6 +71,7 @@ SAMPLE_PICKS = [
 
 
 def prepare_samples() -> List[Dict[str, Any]]:
+    audio_dir = DEFAULT_AUDIO_DIRS[0]
     if not LIBRISPEECH_TAR.exists():
         print(f'ERROR: Download LibriSpeech test-clean first:')
         print(f'  curl -L -o {LIBRISPEECH_TAR} https://www.openslr.org/resources/12/test-clean.tar.gz')
@@ -74,7 +82,7 @@ def prepare_samples() -> List[Dict[str, Any]]:
         LIBRISPEECH_DIR.parent.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(['tar', 'xzf', str(LIBRISPEECH_TAR), '-C', str(LIBRISPEECH_DIR.parent.parent)], check=True)
 
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
     manifest: List[Dict[str, Any]] = []
 
     for i, pick in enumerate(SAMPLE_PICKS):
@@ -95,7 +103,7 @@ def prepare_samples() -> List[Dict[str, Any]]:
                 transcript = line_parts[1]
                 break
 
-        wav_path = AUDIO_DIR / f'sample_{i + 1:02d}.wav'
+        wav_path = audio_dir / f'sample_{i + 1:02d}.wav'
         subprocess.run(
             ['ffmpeg', '-y', '-i', str(flac_path), '-ar', '16000', '-ac', '1', '-sample_fmt', 's16', str(wav_path)],
             capture_output=True,
@@ -123,14 +131,25 @@ def prepare_samples() -> List[Dict[str, Any]]:
         )
         print(f'  Prepared: sample_{i + 1:02d}.wav  {duration:.1f}s  {len(transcript.split())}w  speaker={speaker}')
 
-    with open(AUDIO_DIR / 'manifest.json', 'w') as f:
+    with open(audio_dir / 'manifest.json', 'w') as f:
         json.dump(manifest, f, indent=2)
-    print(f'\n{len(manifest)} samples prepared in {AUDIO_DIR}')
+    print(f'\n{len(manifest)} samples prepared in {audio_dir}')
     return manifest
 
 
-def load_manifest() -> List[Dict[str, Any]]:
-    manifest_path = AUDIO_DIR / 'manifest.json'
+def resolve_audio_dir(custom_path: Optional[str] = None) -> Path:
+    if custom_path:
+        p = Path(custom_path)
+        if (p / 'manifest.json').exists():
+            return p
+    for p in DEFAULT_AUDIO_DIRS:
+        if (p / 'manifest.json').exists():
+            return p
+    raise FileNotFoundError('Could not find audio directory with manifest.json')
+
+
+def load_manifest(audio_dir: Path) -> List[Dict[str, Any]]:
+    manifest_path = audio_dir / 'manifest.json'
     if not manifest_path.exists():
         print('Samples not prepared yet. Running preparation...')
         return prepare_samples()
@@ -155,11 +174,20 @@ def run_modulate(audio_bytes: bytes) -> Tuple[str, float, int]:
 
 
 def main() -> None:
-    if '--prepare' in sys.argv:
+    parser = argparse.ArgumentParser(description='Deepgram & Modulate Pre-recorded Benchmark')
+    parser.add_argument('--prepare', action='store_true', help='Extract LibriSpeech test-clean samples')
+    parser.add_argument('--audio-dir', type=str, default=None, help='Path to audio directory with manifest.json')
+    parser.add_argument('--results-dir', type=str, default=None, help='Directory to save JSON benchmark results')
+    parser.add_argument('--tier', type=str, default='all', choices=['all', 'a', 'b', 'A', 'B'], help='Filter by tier')
+    args = parser.parse_args()
+
+    if args.prepare:
         prepare_samples()
         return
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    audio_dir = resolve_audio_dir(args.audio_dir)
+    results_dir = Path(args.results_dir) if args.results_dir else DEFAULT_RESULTS_DIRS[0]
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     dg_key = os.getenv('DEEPGRAM_API_KEY')
     mod_key = os.getenv('MODULATE_API_KEY')
@@ -170,13 +198,16 @@ def main() -> None:
         print('ERROR: MODULATE_API_KEY not set')
         sys.exit(1)
 
-    manifest = load_manifest()
-    print(f'\nBenchmark Suite 02 — Pre-recorded ({len(manifest)} samples, real human speech)')
-    print(f'Source: LibriSpeech test-clean (CC BY 4.0)\n')
+    manifest = load_manifest(audio_dir)
+    if args.tier and args.tier.lower() != 'all':
+        manifest = [c for c in manifest if c.get('tier', '').lower() == args.tier.lower()]
+
+    print(f'\nBenchmark Suite 02 — Pre-recorded ({len(manifest)} samples)')
+    print(f'Audio Directory: {audio_dir}\n')
 
     results: List[Dict[str, Any]] = []
     for case in manifest:
-        wav_path = AUDIO_DIR / f"{case['id']}.wav"
+        wav_path = audio_dir / f"{case['id']}.wav"
         audio_bytes = wav_path.read_bytes()
         ref_norm = normalize_for_wer(cast(str, case['text']))
 
@@ -260,7 +291,7 @@ def main() -> None:
         results.append(row)
 
     print('\n' + '=' * 110)
-    print('SUITE 02 — PRE-RECORDED BENCHMARK RESULTS (Real Human Speech — LibriSpeech test-clean)')
+    print('SUITE 02 — PRE-RECORDED BENCHMARK RESULTS')
     print('=' * 110)
 
     table_data: List[List[Any]] = []
@@ -301,45 +332,7 @@ def main() -> None:
         )
     )
 
-    valid_dg = [r for r in results if r.get('dg_time', -1) >= 0]
-    valid_mod = [r for r in results if r.get('mod_time', -1) >= 0]
-
-    print('\nSUMMARY (WER computed after stripping punctuation):')
-    if valid_dg:
-        avg_dg_time = sum(r['dg_time'] for r in valid_dg) / len(valid_dg)
-        avg_dg_wer = sum(r['dg_wer'] for r in valid_dg) / len(valid_dg)
-        avg_dg_punct = sum(r.get('dg_punct', 0) for r in valid_dg) / len(valid_dg)
-        print(
-            f"  Deepgram:  avg_latency={avg_dg_time:.2f}s  avg_WER={avg_dg_wer:.1%}  "
-            f"avg_punct={avg_dg_punct:.1f}  cases={len(valid_dg)}"
-        )
-    if valid_mod:
-        avg_mod_time = sum(r['mod_time'] for r in valid_mod) / len(valid_mod)
-        avg_mod_wer = sum(r['mod_wer'] for r in valid_mod) / len(valid_mod)
-        avg_mod_punct = sum(r.get('mod_punct', 0) for r in valid_mod) / len(valid_mod)
-        print(
-            f"  Modulate:  avg_latency={avg_mod_time:.2f}s  avg_WER={avg_mod_wer:.1%}  "
-            f"avg_punct={avg_mod_punct:.1f}  cases={len(valid_mod)}"
-        )
-
-    print('\nTRANSCRIPT COMPARISON:')
-    for r in results:
-        print(f"\n  [{r['id']}] {r['description']}")
-        print(f"    REF:      {r['ref_text']}")
-        if str(r.get('dg_text', '')).startswith('ERROR'):
-            print(f"    DEEPGRAM: {r.get('dg_text', 'N/A')}")
-        else:
-            print(
-                f"    DEEPGRAM: {r.get('dg_text', 'N/A')}  (WER={r.get('dg_wer', 1):.1%}, punct={r.get('dg_punct', 0)})"
-            )
-        if str(r.get('mod_text', '')).startswith('ERROR'):
-            print(f"    MODULATE: {r.get('mod_text', 'N/A')}")
-        else:
-            print(
-                f"    MODULATE: {r.get('mod_text', 'N/A')}  (WER={r.get('mod_wer', 1):.1%}, punct={r.get('mod_punct', 0)})"
-            )
-
-    output_path = RESULTS_DIR / 'suite02_prerecorded_benchmark.json'
+    output_path = results_dir / 'suite02_prerecorded_benchmark.json'
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2)
     print(f'\nDetailed results saved to: {output_path}')
