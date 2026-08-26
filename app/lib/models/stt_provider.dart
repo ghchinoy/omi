@@ -301,24 +301,24 @@ class SttProviderConfig {
       requiresApiKey: true,
       requestType: SttRequestType.jsonBase64,
       supportedLanguages: SttLanguages.geminiSupported,
-      supportedModels: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+      supportedModels: ['gemini-3.5-transcribe-preview', 'gemini-2.5-flash', 'gemini-2.5-pro'],
       defaultLanguage: 'en',
-      defaultModel: 'gemini-2.0-flash',
+      defaultModel: 'gemini-3.5-transcribe-preview',
       responseSchema: SttResponseSchema.gemini,
       apiKeyUrl: 'https://aistudio.google.com/apikey',
       docsUrl: 'https://ai.google.dev/gemini-api/docs/models/gemini',
     ),
     SttProvider.geminiLive: const SttProviderConfig(
       provider: SttProvider.geminiLive,
-      displayName: 'Google Gemini',
+      displayName: 'Google Gemini Live',
       description: 'Google Gemini - Real-time streaming',
       icon: FontAwesomeIcons.google,
       requiresApiKey: true,
       requestType: SttRequestType.streaming,
       supportedLanguages: SttLanguages.geminiSupported,
-      supportedModels: ['gemini-2.5-flash-native-audio-preview-12-2025'],
+      supportedModels: ['gemini-3.5-transcribe-live-preview', 'gemini-2.5-flash-native-audio-preview-12-2025'],
       defaultLanguage: 'en',
-      defaultModel: 'gemini-2.5-flash-native-audio-preview-12-2025',
+      defaultModel: 'gemini-3.5-transcribe-live-preview',
       responseSchema: SttResponseSchema.geminiLive,
       apiKeyUrl: 'https://aistudio.google.com/apikey',
       docsUrl: 'https://ai.google.dev/gemini-api/docs/models/gemini',
@@ -487,7 +487,7 @@ class SttProviderConfig {
         break;
 
       case SttProvider.gemini:
-        final modelName = mdl.isNotEmpty ? mdl : 'gemini-2.0-flash';
+        final modelName = mdl.isNotEmpty ? mdl : 'gemini-3.5-transcribe-preview';
         config['url'] =
             'https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=${apiKey ?? ''}';
         config['headers'] = {'Content-Type': 'application/json'};
@@ -498,7 +498,7 @@ class SttProviderConfig {
         config['url'] =
             'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey ?? ''}';
         config['params'] = {
-          'model': mdl.isNotEmpty ? mdl : 'gemini-2.5-flash-native-audio-preview-12-2025',
+          'model': mdl.isNotEmpty ? mdl : 'gemini-3.5-transcribe-live-preview',
           'language': lang,
         };
         break;

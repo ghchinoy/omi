@@ -384,7 +384,7 @@ class TranscriptSocketServiceFactory {
       return GeminiStreamingSttSocket(
         apiKey: config.apiKey ?? '',
         model:
-            config.effectiveModel.isNotEmpty ? config.effectiveModel : 'gemini-2.5-flash-native-audio-preview-12-2025',
+            config.effectiveModel.isNotEmpty ? config.effectiveModel : 'gemini-3.5-transcribe-live-preview',
         language: config.effectiveLanguage,
         sampleRate: sampleRate,
         transcoder: transcoder,

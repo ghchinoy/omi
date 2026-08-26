@@ -142,7 +142,7 @@ class GeminiStreamingSttSocket implements IPureSocket {
 
   GeminiStreamingSttSocket({
     required this.apiKey,
-    this.model = 'gemini-2.5-flash-native-audio-preview-12-2025',
+    this.model = 'gemini-3.5-transcribe-live-preview',
     this.language = 'en',
     this.sampleRate = 16000,
     this.transcoder,
