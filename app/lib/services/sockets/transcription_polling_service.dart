@@ -169,7 +169,7 @@ class SchemaBasedSttProvider implements ISttProvider {
 
   factory SchemaBasedSttProvider.gemini({
     required String apiKey,
-    String model = 'gemini-2.5-flash',
+    String model = 'gemini-3.5-transcribe-preview',
     String language = 'en',
   }) {
     return SchemaBasedSttProvider(
